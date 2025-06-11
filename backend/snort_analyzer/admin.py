@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import SnortAlert, IPStats, DailyStats
+from .models import SnortAlert, IPStats, DailyStats, AttackNotification
 
 @admin.register(SnortAlert)
 class SnortAlertAdmin(admin.ModelAdmin):
@@ -19,3 +19,9 @@ class IPStatsAdmin(admin.ModelAdmin):
 class DailyStatsAdmin(admin.ModelAdmin):
     list_display = ('date', 'total_alerts', 'high_severity', 'medium_severity', 
                    'low_severity', 'anomaly_count')
+
+@admin.register(AttackNotification)
+class AttackNotificationAdmin(admin.ModelAdmin):
+    list_display = (    'attack_type', 'severity', 'is_read', 'timestamp')
+    list_filter = ('severity', 'is_read', 'timestamp')
+    search_fields = ('attack_type', 'description')

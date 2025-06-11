@@ -1,5 +1,3 @@
-# snort_analyzer/management/commands/parse_csv_logs.py
-
 import csv
 import os
 
@@ -8,7 +6,7 @@ from datetime import datetime
 from django.core.management.base import BaseCommand
 from django.db import transaction
 from django.conf import settings
-from snort_analyzer.models import SnortAlert, IPStats, DailyStats
+from snort_analyzer.models import SnortAlert, IPStats, DailyStats, AttackNotification
 from snort_analyzer.ml.anomaly_detection import detect_anomaly
 
 class Command(BaseCommand):
@@ -29,7 +27,7 @@ class Command(BaseCommand):
             self.stdout.write(self.style.ERROR(f'File not found: {file_path}'))
             return
         
-        # Debug the CSV structure first
+        
         self.debug_csv_structure(file_path)
             
         self.stdout.write(self.style.SUCCESS(f'Parsing CSV file: {file_path}'))
@@ -64,12 +62,18 @@ class Command(BaseCommand):
             with open(file_path, 'r') as csv_file:
                 reader = csv.DictReader(csv_file)
                 
-                with transaction.atomic():
-                    for row in reader:
-                        alert = self.process_row(row)
-                        if alert:
-                            imported_count += 1
-            
+                
+                for row in reader:
+                    try:
+                        
+                        with transaction.atomic():
+                            alert = self.process_row(row)
+                            if alert:
+                                imported_count += 1
+                    except Exception as e:
+                        self.stdout.write(self.style.ERROR(f'Error processing CSV row: {str(e)}'))
+                       
+        
             return imported_count
         except Exception as e:
             self.stdout.write(self.style.ERROR(f'Error parsing CSV: {str(e)}'))
@@ -78,62 +82,60 @@ class Command(BaseCommand):
     def process_row(self, row):
         """Process a single CSV row and store in database"""
         try:
-            # Get the timestamp string
+           
             timestamp_str = row.get('timestamp', '').strip()
             
-            # The logs have format MM/DD-HH:MM:SS.ffffff without year
-            # We need to add the current year to parse it
+           
             if '/' in timestamp_str and '-' in timestamp_str:
-                # Add current year since it's missing from timestamp
+               
                 current_year = datetime.now().year
                 
-                # Split the timestamp into parts
+                
                 date_part, time_part = timestamp_str.split('-')
                 month, day = date_part.split('/')
                 
-                # Reconstruct with year
+               
                 timestamp_with_year = f"{current_year}-{month}-{day} {time_part}"
                 
-                # Try to parse with the reconstructed format
+                
                 try:
                     timestamp = datetime.strptime(timestamp_with_year, '%Y-%m-%d %H:%M:%S.%f')
-                    # Add timezone to avoid Django warning
+                    
                     timezone = pytz.timezone(settings.TIME_ZONE)
                     timestamp = timezone.localize(timestamp)
                     
-                    # Get source IP - check different possible field names
+                    
                     source_ip = row.get('src_ip', row.get('source_ip', row.get('ip_src', '')))
                     if not source_ip:
-                        # If no source IP found, use a placeholder value
+                       
                         source_ip = '0.0.0.0'
                         self.stdout.write(self.style.WARNING(f"No source IP found in row, using placeholder"))
                     
-                    # Get destination IP - check different possible field names
+                    
                     dest_ip = row.get('dest_ip', row.get('destination_ip', row.get('ip_dest', '')))
                     if not dest_ip:
-                        # If no destination IP found, use a placeholder value
+                        
                         dest_ip = '0.0.0.0'
                     
-                    # Get signature ID
+                    
                     signature_id = int(row.get('signature_id', row.get('sid', 0)))
                     
-                    # Get protocol
+                   
                     protocol = row.get('protocol', row.get('proto', 'unknown'))
                     
-                    # Get ports
+                    
                     src_port = int(row.get('src_port', row.get('sport', 0)))
                     dst_port = int(row.get('dest_port', row.get('dport', 0)))
                     
-                    # Get severity
+                    
                     severity = int(row.get('severity', row.get('priority', 3)))
                     
-                    # Get signature message
+                    
                     signature = row.get('signature', row.get('msg', ''))
                     
-                    # Raw log data
+                   
                     raw_log = row.get('raw_log', row.get('full_log', ''))
                     
-                    # Check if alert already exists to avoid duplicates
                     alert, created = SnortAlert.objects.update_or_create(
                         signature_id=signature_id,
                         timestamp=timestamp,
@@ -149,11 +151,11 @@ class Command(BaseCommand):
                         }
                     )
                     
-                    # Process anomaly detection if needed
+                   
                     if 'is_anomalous' in row:
                         alert.is_anomalous = row.get('is_anomalous', '').lower() in ('true', 't', '1', 'yes')
                     else:
-                        # Run anomaly detection if not in CSV
+
                         alert.is_anomalous, alert.anomaly_score = detect_anomaly(alert)
                         
                     if 'anomaly_score' in row:
@@ -161,9 +163,46 @@ class Command(BaseCommand):
                         
                     alert.save()
                     
-                    # Update statistics
+                   
                     self.update_statistics(alert)
                     
+                    
+                    if alert.is_anomalous:
+                       
+                        from django.contrib.auth.models import User
+                        try:
+                            user = User.objects.get(username='admin')
+                        except User.DoesNotExist:
+                            user = User.objects.first()
+                        
+                        if user:
+                            
+                            severity_text = 'high' if alert.severity == 1 else ('medium' if alert.severity == 2 else 'low')
+                            AttackNotification.objects.create(
+                                user=user,  
+                                attack_type=f"Anomalous {alert.protocol} Traffic Detected",  # Changed from title
+                                description=f"Anomalous {alert.protocol} traffic detected from {alert.source_ip} to {alert.destination_ip} with signature: {alert.signature}",  # Changed from message
+                                severity=severity_text,
+                                
+                            )
+                    elif alert.severity == 1:
+                        
+                        from django.contrib.auth.models import User
+                        try:
+                            user = User.objects.get(username='admin')
+                        except User.DoesNotExist:
+                            user = User.objects.first()
+                        
+                        if user:
+                            
+                            AttackNotification.objects.create(
+                                user=user,  
+                                attack_type=f"High Severity Alert", 
+                                description=f"High severity {alert.protocol} alert from {alert.source_ip} to {alert.destination_ip}: {alert.signature}",  # Changed from message
+                                severity='high',
+                                
+                            )
+                        
                     if created:
                         self.stdout.write(self.style.SUCCESS(
                             f"Imported alert: {alert.signature} from {alert.source_ip} to {alert.destination_ip}"
@@ -174,7 +213,7 @@ class Command(BaseCommand):
                 except ValueError:
                     self.stdout.write(self.style.WARNING(f"Could not parse timestamp with year: {timestamp_with_year}"))
             
-            # If we're here, the special format didn't work, try the original formats
+            
             timestamp = None
             formats_to_try = [
                 '%Y-%m-%d %H:%M:%S',        # 2023-05-18 14:30:45
@@ -188,21 +227,20 @@ class Command(BaseCommand):
             for fmt in formats_to_try:
                 try:
                     timestamp = datetime.strptime(timestamp_str, fmt)
-                    # Add timezone
+                    
                     timezone = pytz.timezone(settings.TIME_ZONE)
                     timestamp = timezone.localize(timestamp)
-                    break  # Exit the loop if parsing succeeds
+                    break 
                 except ValueError:
                     continue
                 
-            # Original code for handling "standard" formats
+            
             if timestamp is None:
-                # If all formats failed, log the problematic timestamp and raise an error
+               
                 self.stdout.write(self.style.ERROR(f"Couldn't parse timestamp: {timestamp_str}"))
                 raise ValueError(f"Timestamp format not recognized: {timestamp_str}")
                 
-            # The rest of your code (which will only run if the special format didn't work but one of the standard formats did)
-            # ...
+            
                 
         except Exception as e:
             self.stdout.write(self.style.ERROR(f"Error processing CSV row: {str(e)}"))
@@ -210,7 +248,7 @@ class Command(BaseCommand):
             
     def update_statistics(self, alert):
         """Update IP and daily statistics"""
-        # Update source IP stats
+        
         source_stat, _ = IPStats.objects.get_or_create(
             ip_address=alert.source_ip,
             is_source=True
@@ -222,7 +260,7 @@ class Command(BaseCommand):
         source_stat.increment_port(alert.destination_port)
         source_stat.save()
         
-        # Update destination IP stats
+        
         dest_stat, _ = IPStats.objects.get_or_create(
             ip_address=alert.destination_ip,
             is_source=False
@@ -234,7 +272,7 @@ class Command(BaseCommand):
         dest_stat.increment_port(alert.source_port)
         dest_stat.save()
         
-        # Update daily stats
+        
         day = alert.timestamp.date()
         daily_stat, _ = DailyStats.objects.get_or_create(date=day)
         daily_stat.total_alerts += 1

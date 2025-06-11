@@ -40,13 +40,13 @@ class SnortAlert(models.Model):
 
 
 class IPStats(models.Model):
-    ip_address = models.GenericIPAddressField(unique=True)
-    alert_count = models.PositiveIntegerField(default=0)
-    anomaly_count = models.PositiveIntegerField(default=0)
-    last_seen = models.DateTimeField(auto_now=True)
+    ip_address = models.GenericIPAddressField()
     is_source = models.BooleanField(default=True)
-    protocols = models.JSONField(default=dict)  # Format: {"TCP": 10, "UDP": 5, ...}
-    ports = models.JSONField(default=dict)      # Format: {"80": 10, "443": 5, ...}
+    alert_count = models.IntegerField(default=0)
+    anomaly_count = models.IntegerField(default=0)
+    last_seen = models.DateTimeField(auto_now=True)
+    protocols = models.JSONField(default=dict)  
+    ports = models.JSONField(default=dict)      
     
     class Meta:
         indexes = [
@@ -54,6 +54,7 @@ class IPStats(models.Model):
             models.Index(fields=['-anomaly_count']),
             models.Index(fields=['-last_seen']),
         ]
+        unique_together = ('ip_address', 'is_source')
     
     def __str__(self):
         return f"{self.ip_address} (Alerts: {self.alert_count})"
@@ -97,6 +98,48 @@ class UserProfile(models.Model):
     
     def __str__(self):
         return f"{self.user.username}'s Profile"
+
+
+class Notification(models.Model):
+    SEVERITY_CHOICES = (
+        ('high', 'High'),
+        ('medium', 'Medium'),
+        ('low', 'Low'),
+    )
+    
+    title = models.CharField(max_length=255)
+    message = models.TextField()
+    severity = models.CharField(max_length=10, choices=SEVERITY_CHOICES, default='medium')
+    is_read = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    related_alert = models.ForeignKey('SnortAlert', on_delete=models.CASCADE, null=True, blank=True)
+    
+    class Meta:
+        ordering = ['-created_at']
+    
+    def __str__(self):
+        return self.title
+
+
+class AttackNotification(models.Model):
+    SEVERITY_CHOICES = (
+        ('high', 'High'),
+        ('medium', 'Medium'),
+        ('low', 'Low'),
+    )
+    
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='attack_notifications')
+    timestamp = models.DateTimeField(auto_now_add=True)
+    attack_type = models.CharField(max_length=100)
+    description = models.TextField()
+    severity = models.CharField(max_length=10, choices=SEVERITY_CHOICES, default='medium')
+    is_read = models.BooleanField(default=False)
+    
+    class Meta:
+        ordering = ['-timestamp']
+    
+    def __str__(self):
+        return f"{self.attack_type} - {self.timestamp}"
 
 
 @receiver(post_save, sender=User)

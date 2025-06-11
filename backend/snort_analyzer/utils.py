@@ -1,4 +1,3 @@
-# Add to snort_analyzer/utils.py
 import csv
 from datetime import datetime
 from django.db import transaction
@@ -31,11 +30,11 @@ def parse_snort_csv(file_path, update_stats=True):
             
             with transaction.atomic():
                 for row in reader:
-                    # Parse timestamp
+                    
                     timestamp = datetime.strptime(row.get('timestamp', ''), '%Y-%m-%d %H:%M:%S')
                     signature_id = int(row.get('signature_id', 0))
                     
-                    # Create or update alert
+                    
                     alert, created = SnortAlert.objects.update_or_create(
                         signature_id=signature_id,
                         timestamp=timestamp,
@@ -56,7 +55,7 @@ def parse_snort_csv(file_path, update_stats=True):
                     if created:
                         imported_count += 1
                         
-                    # Update statistics if needed
+                    
                     if update_stats:
                         update_statistics(alert)
         
