@@ -13,7 +13,7 @@ It captures and analyzes network packets, classifies threats, and displays them 
 
 ---
 
-## ⚙️ System Architecture
+## System Architecture
 1. **Data Collection:**  
    - Snort captures packets and logs suspicious activity.
    - Logs are saved in `alerts.csv` (shared folder).
@@ -46,6 +46,7 @@ It captures and analyzes network packets, classifies threats, and displays them 
 - Custom Snort rules for common attacks + ICMP ping detection
 
 ---
+
 
 
 
