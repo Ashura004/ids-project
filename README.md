@@ -1,7 +1,7 @@
-# Machine Learning-based Intrusion Detection System (IDS)
+# Model Sentinel IDS
 
 ## Overview
-This project is a **network-based Intrusion Detection System** built using:
+ModelSentinel is a **network-based Intrusion Detection System** built for my final year project using:
 - **Backend:** Django REST API (SQLite database)
 - **Frontend:** Next.js + Tailwind CSS
 - **IDS Engine:** Snort
@@ -46,6 +46,7 @@ It captures and analyzes network packets, classifies threats, and displays them 
 - Custom Snort rules for common attacks + ICMP ping detection
 
 ---
+
 
 
 
