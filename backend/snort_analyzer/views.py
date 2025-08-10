@@ -1,631 +1,722 @@
 from django.shortcuts import render
-from rest_framework import viewsets, filters, status
-from rest_framework.decorators import action, api_view, permission_classes
-from rest_framework.permissions import AllowAny, IsAuthenticated
-from rest_framework.response import Response
-from django.db.models import Count, F, Q
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_http_methods
+from django.core.paginator import Paginator
+from django.db.models import Q
+from .models import SnortAlert
+import json
+from datetime import datetime, timedelta
 from django.utils import timezone
-from datetime import timedelta, datetime
-from django_filters.rest_framework import DjangoFilterBackend
-from django.http import JsonResponse, FileResponse, HttpResponse
-from django.contrib.auth import authenticate
-from rest_framework_simplejwt.tokens import RefreshToken
-
-from snort_analyzer.notification_serializers import AttackNotificationSerializer
-from ids_project import settings
-from .auth_serializers import UserSerializer, RegisterSerializer, LoginSerializer
-from django.contrib.auth.models import User
-
-from .models import SnortAlert, IPStats, DailyStats, AttackNotification
-from .serializers import (
-    SnortAlertSerializer, IPStatsSerializer, DailyStatsSerializer,
-    AlertCountByProtocolSerializer, TopSourceIPsSerializer,
-    TopDestinationIPsSerializer, AlertTrendSerializer
-)
-from django.template.loader import render_to_string
+import io
+import os
 from django.core.mail import EmailMessage
-from io import BytesIO
-from reportlab.lib.pagesizes import letter, landscape
+from django.conf import settings
+from django.template.loader import render_to_string
 from reportlab.lib import colors
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
+from reportlab.lib.pagesizes import letter, A4
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
 from reportlab.graphics.shapes import Drawing
 from reportlab.graphics.charts.piecharts import Pie
-from reportlab.graphics.charts.linecharts import HorizontalLineChart
-from reportlab.lib.units import inch
-import logging
+from reportlab.graphics.charts.barcharts import VerticalBarChart
 
-logger = logging.getLogger(__name__)
+def dashboard_view(request):
+    """Main dashboard view - serves the HTML page"""
+    return render(request, 'dashboard.html')
 
-class SnortAlertViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = SnortAlert.objects.all()
-    serializer_class = SnortAlertSerializer
-    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
-    filterset_fields = ['severity', 'protocol', 'is_anomalous']
-    ordering_fields = ['timestamp', 'source_ip', 'destination_ip', 'anomaly_score']
-    ordering = ['-timestamp']
-    
-    @action(detail=False, methods=['get'])
-    def dashboard_data(self, request):
-        """
-        Get aggregated data for the dashboard
-        """
-        
-        days = int(request.query_params.get('days', 7))
-        start_date = timezone.now() - timedelta(days=days)
-        
-        
-        queryset = SnortAlert.objects.filter(timestamp__gte=start_date)
-        
-        
-        severity_counts = queryset.values('severity').annotate(
-            count=Count('id')
-        ).order_by('severity')
-        
-        
-        protocol_counts = queryset.values('protocol').annotate(
-            count=Count('id')
-        ).order_by('-count')[:10]
-        
-        
-        top_source_ips = IPStats.objects.filter(
-            is_source=True, 
-            last_seen__gte=start_date
-        ).order_by('-alert_count')[:10]
-        
-        
-        top_dest_ips = IPStats.objects.filter(
-            is_source=False,
-            last_seen__gte=start_date
-        ).order_by('-alert_count')[:10]
-        
-        
-        trends = DailyStats.objects.filter(
-            date__gte=start_date.date()
-        ).values('date', 'total_alerts', 'anomaly_count')
-        
-        
-        anomaly_counts = {
-            'normal': queryset.filter(is_anomalous=False).count(),
-            'anomalous': queryset.filter(is_anomalous=True).count()
-        }
-        
-        
-        return Response({
-            'severity_counts': severity_counts,
-            'protocol_counts': protocol_counts,
-            'top_source_ips': IPStatsSerializer(top_source_ips, many=True).data,
-            'top_destination_ips': IPStatsSerializer(top_dest_ips, many=True).data,
-            'trends': trends,
-            'anomaly_distribution': anomaly_counts,
-            'total_alerts': queryset.count()
-        })
-
-@api_view(['GET'])
-def dashboard_data(request):
-    """API endpoint for dashboard summary data"""
-    
-    last_24h = datetime.now() - timedelta(days=1)
-    
-    
-    total_alerts = SnortAlert.objects.count()
-    recent_alerts = SnortAlert.objects.filter(timestamp__gte=last_24h).count()
-    
-   
-    severity_counts = list(
-        SnortAlert.objects.values('severity')
-                          .annotate(count=Count('id'))
-                          .order_by('severity')
-    )
-    
-    
-    protocol_counts = list(
-        SnortAlert.objects.values('protocol')
-                          .annotate(count=Count('id'))
-                          .order_by('-count')[:5]
-    )
-    
-    
-    anomalies = SnortAlert.objects.filter(is_anomalous=True).count()
-    
-    return Response({
-        'total_alerts': total_alerts,
-        'recent_alerts': recent_alerts,
-        'severity_distribution': severity_counts,
-        'protocol_distribution': protocol_counts,
-        'anomalies': anomalies,
-    })
-
+@csrf_exempt
+@require_http_methods(["GET"])
 def dashboard_api(request):
     """API endpoint for dashboard data"""
-    time_range = request.GET.get('time_range', '24h')
-    
-
-    if time_range == 'all':
-        alerts = SnortAlert.objects.all()
-    else:
+    try:
+        print("Dashboard API called")
+        
+        # Get time range parameter
+        time_range = request.GET.get('time_range', '24h')
+        print(f"Time range: {time_range}")
+        
+        # Calculate date filter based on time range
         now = timezone.now()
-        if time_range == '24h':
-            start_time = now - timedelta(hours=24)
+        if time_range == '1h':
+            start_time = now - timedelta(hours=1)
+        elif time_range == '24h':
+            start_time = now - timedelta(days=1)
         elif time_range == '7d':
             start_time = now - timedelta(days=7)
         elif time_range == '30d':
             start_time = now - timedelta(days=30)
+        else:  # 'all' or any other value
+            start_time = None
+        
+        # Filter alerts by time range
+        if start_time:
+            alerts_queryset = SnortAlert.objects.filter(timestamp__gte=start_time)
+            latest_alerts = alerts_queryset.order_by('-timestamp')[:20]
         else:
-            start_time = now - timedelta(days=365)
-    
-        alerts = SnortAlert.objects.filter(timestamp__gte=start_time)
-    
-    
-    high_severity = alerts.filter(severity=1).count()
-    medium_severity = alerts.filter(severity=2).count()
-    low_severity = alerts.filter(severity__gt=2).count()
-    
-    
-    severity_distribution = [
-        {'severity': 1, 'count': high_severity, 'name': 'High'},
-        {'severity': 2, 'count': medium_severity, 'name': 'Medium'},
-        {'severity': 3, 'count': low_severity, 'name': 'Low'}
-    ]
-    
-    
-    anomalies = alerts.filter(is_anomalous=True).count()
-    
-    
-    protocol_distribution = list(
-        alerts.values('protocol')
-        .annotate(count=Count('protocol'))
-        .order_by('-count')[:5]  
-    )
-    
-    
-    protocol_data = []
-    for item in protocol_distribution:
-        if item['protocol']:  
-            protocol_data.append({
-                'protocol': item['protocol'],
-                'count': item['count']
+            alerts_queryset = SnortAlert.objects.all()
+            latest_alerts = alerts_queryset.order_by('-timestamp')[:20]
+        
+        alerts_data = []
+        for alert in latest_alerts:
+            alerts_data.append({
+                'id': alert.id,
+                'timestamp': alert.timestamp.strftime('%Y-%m-%d %H:%M:%S') if alert.timestamp else 'Unknown',
+                'source_ip': alert.source_ip or 'Unknown',
+                'destination_ip': alert.destination_ip or 'Unknown',
+                'signature': alert.signature or 'Unknown',
+                'severity': alert.severity,
+                'severity_text': get_severity_display(alert.severity),
+                'protocol': alert.protocol.upper() if alert.protocol else 'UNKNOWN',
+                'is_anomalous': bool(alert.is_anomalous),
+                'anomaly_score': round(float(alert.anomaly_score), 3) if alert.anomaly_score else 0.000,
+                'status': 'ANOMALY' if alert.is_anomalous else 'NORMAL'
             })
-    
-    
-    top_source_ips = list(IPStats.objects.filter(is_source=True)
-        .order_by('-alert_count')[:5]
-        .values('ip_address', 'alert_count'))
 
-    
-    top_destination_ips = list(IPStats.objects.filter(is_source=False)
-        .order_by('-alert_count')[:5]
-        .values('ip_address', 'alert_count'))
-    
-
-    return JsonResponse({
-        'total_alerts': alerts.count(),
-        'anomalies': anomalies,
-        'severity_distribution': severity_distribution,
-        'protocol_distribution': protocol_data,
-        'top_source_ips': top_source_ips,
-        'top_destination_ips': top_destination_ips,
-    })
-
-@api_view(['POST'])
-def register_user(request):
-    serializer = RegisterSerializer(data=request.data)
-    if serializer.is_valid():
-        user = serializer.save()
-        refresh = RefreshToken.for_user(user)
-        return Response({
-            'user': UserSerializer(user).data,
-            'refresh': str(refresh),
-            'access': str(refresh.access_token),
-        }, status=status.HTTP_201_CREATED)
-    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-@api_view(['POST'])
-def login_user(request):
-    serializer = LoginSerializer(data=request.data)
-    if serializer.is_valid():
-        username = serializer.validated_data['username']
-        password = serializer.validated_data['password']
         
-        user = authenticate(username=username, password=password)
+        if start_time:
+            total_alerts = SnortAlert.objects.filter(timestamp__gte=start_time).count()
+            total_anomalies = SnortAlert.objects.filter(timestamp__gte=start_time, is_anomalous=True).count()
+            high_severity_alerts = SnortAlert.objects.filter(timestamp__gte=start_time, severity=1).count()
+        else:
+            total_alerts = SnortAlert.objects.count()
+            total_anomalies = SnortAlert.objects.filter(is_anomalous=True).count()
+            high_severity_alerts = SnortAlert.objects.filter(severity=1).count()
+
+        print(f"Returning {len(alerts_data)} recent alerts, {total_alerts} total for {time_range}")
+
+        return JsonResponse({
+            'status': 'success',
+            'total_alerts': total_alerts,
+            'recent_alerts': alerts_data,
+            'summary': {
+                'total_alerts': total_alerts,
+                'total_anomalies': total_anomalies,
+                'high_severity_alerts': high_severity_alerts,
+                'anomaly_rate': round((total_anomalies / total_alerts * 100), 1) if total_alerts > 0 else 0
+            }
+        })
+
+    except Exception as e:
+        import traceback
+        print(f"Dashboard API Error: {e}")
+        print(traceback.format_exc())
+        return JsonResponse({
+            'status': 'error',
+            'error': str(e)
+        }, status=500)
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def alerts_api(request):
+    """API endpoint for paginated and filtered alerts"""
+    try:
         
-        if user is not None:
-            
-            user.profile.login_count += 1
-            if 'HTTP_X_FORWARDED_FOR' in request.META:
-                user.profile.last_login_ip = request.META['HTTP_X_FORWARDED_FOR']
-            else:
-                user.profile.last_login_ip = request.META['REMOTE_ADDR']
-            user.profile.save()
-            
-            refresh = RefreshToken.for_user(user)
-            return Response({
-                'user': UserSerializer(user).data,
-                'refresh': str(refresh),
-                'access': str(refresh.access_token),
+        page = int(request.GET.get('page', 1))
+        page_size = 20
+        severity_filter = request.GET.get('severity', '')
+        protocol_filter = request.GET.get('protocol', '')
+        is_anomalous_filter = request.GET.get('is_anomalous', '')
+        
+        print(f"Alerts API called with: page={page}, severity={severity_filter}, protocol={protocol_filter}, anomaly={is_anomalous_filter}")
+        
+        
+        alerts_queryset = SnortAlert.objects.all().order_by('-timestamp')
+        
+        
+        if severity_filter:
+            alerts_queryset = alerts_queryset.filter(severity=int(severity_filter))
+        
+        if protocol_filter:
+            alerts_queryset = alerts_queryset.filter(protocol__icontains=protocol_filter)
+        
+        if is_anomalous_filter:
+            is_anomalous_bool = is_anomalous_filter.lower() == 'true'
+            alerts_queryset = alerts_queryset.filter(is_anomalous=is_anomalous_bool)
+        
+        
+        paginator = Paginator(alerts_queryset, page_size)
+        total_pages = paginator.num_pages
+        page_obj = paginator.get_page(page)
+        
+        
+        alerts_data = []
+        for alert in page_obj:
+            alerts_data.append({
+                'id': alert.id,
+                'timestamp': alert.timestamp.isoformat() if alert.timestamp else None,
+                'source_ip': alert.source_ip,
+                'source_port': alert.source_port,
+                'destination_ip': alert.destination_ip,
+                'destination_port': alert.destination_port,
+                'signature': alert.signature,
+                'protocol': alert.protocol.upper(),
+                'severity': alert.severity,
+                'severity_display': get_severity_display(alert.severity),
+                'is_anomalous': alert.is_anomalous,
+                'anomaly_score': float(alert.anomaly_score) if alert.anomaly_score else 0.0,
+                'signature_id': alert.signature_id,
             })
-        return Response({'error': 'Invalid credentials'}, status=status.HTTP_401_UNAUTHORIZED)
-    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-@api_view(['GET'])
-def user_profile(request):
-    return Response(UserSerializer(request.user).data)
-
-@api_view(['POST'])
-def logout_user(request):
-    return Response({'detail': 'Successfully logged out.'})
-
-@api_view(['GET'])
-def get_attack_notifications(request):
-    """Get user's attack notifications"""
-    
-   
-    if request.user.is_authenticated:
-        user = request.user
-    else:
         
-        user = User.objects.first()
-        if not user:
-           
-            return Response([])
-    
-    
-    notifications = AttackNotification.objects.filter(user=user).order_by('-timestamp')
-    data = AttackNotificationSerializer(notifications, many=True).data
-    return Response(data)
+        print(f"Returning {len(alerts_data)} alerts out of {paginator.count} total")
+        
+        return JsonResponse({
+            'status': 'success',
+            'results': alerts_data,
+            'count': paginator.count,
+            'total_pages': total_pages,
+            'current_page': page,
+            'has_next': page_obj.has_next(),
+            'has_previous': page_obj.has_previous(),
+            'next': page + 1 if page_obj.has_next() else None,
+            'previous': page - 1 if page_obj.has_previous() else None
+        })
 
-@api_view(['POST'])
+    except Exception as e:
+        import traceback
+        print(f"Alerts API Error: {e}")
+        print(traceback.format_exc())
+        return JsonResponse({
+            'status': 'error',
+            'error': str(e)
+        }, status=500)
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def live_alerts(request):
+    """API endpoint for live alerts (WebSocket alternative)"""
+    try:
+        
+        latest_alerts = SnortAlert.objects.order_by('-timestamp')[:10]
+        alerts_data = []
+        
+        for alert in latest_alerts:
+            alerts_data.append({
+                'id': alert.id,
+                'timestamp': alert.timestamp.isoformat() if alert.timestamp else None,
+                'source_ip': alert.source_ip,
+                'destination_ip': alert.destination_ip,
+                'signature': alert.signature,
+                'severity': alert.severity,
+                'is_anomalous': alert.is_anomalous,
+                'anomaly_score': float(alert.anomaly_score) if alert.anomaly_score else 0.0,
+            })
+        
+        return JsonResponse({
+            'status': 'success',
+            'alerts': alerts_data
+        })
+    
+    except Exception as e:
+        return JsonResponse({
+            'status': 'error',
+            'error': str(e)
+        }, status=500)
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def notifications_api(request):
+    """API endpoint for notifications (placeholder)"""
+    try:
+        # For now, return empty notifications
+        # You can implement a Notification model later
+        return JsonResponse({
+            'status': 'success',
+            'notifications': []
+        })
+    
+    except Exception as e:
+        return JsonResponse({
+            'status': 'error',
+            'error': str(e)
+        }, status=500)
+
+@csrf_exempt
+@require_http_methods(["POST"])
 def mark_notification_read(request, notification_id):
-    """Mark a notification as read"""
+    """API endpoint to mark notification as read (placeholder)"""
     try:
+        # Placeholder - implement when you have Notification model
+        return JsonResponse({
+            'status': 'success',
+            'message': 'Notification marked as read'
+        })
+    
+    except Exception as e:
+        return JsonResponse({
+            'status': 'error',
+            'error': str(e)
+        }, status=500)
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def alert_detail_api(request, alert_id):
+    """API endpoint for individual alert details"""
+    try:
+        print(f"Alert detail API called for ID: {alert_id}")
         
-        user = request.user if request.user.is_authenticated else User.objects.first()
-        if not user:
-            return Response({'status': 'error', 'message': 'No users available'}, status=404)
+        # Get the specific alert
+        try:
+            alert = SnortAlert.objects.get(id=alert_id)
+        except SnortAlert.DoesNotExist:
+            return JsonResponse({
+                'status': 'error',
+                'error': 'Alert not found'
+            }, status=404)
+        
+        # Serialize detailed alert data
+        alert_data = {
+            'id': alert.id,
+            'timestamp': alert.timestamp.isoformat() if alert.timestamp else None,
+            'source_ip': alert.source_ip,
+            'source_port': alert.source_port,
+            'destination_ip': alert.destination_ip,
+            'destination_port': alert.destination_port,
+            'signature': alert.signature,
+            'protocol': alert.protocol.upper() if alert.protocol else 'UNKNOWN',
+            'severity': alert.severity,
+            'severity_display': get_severity_display(alert.severity),
+            'is_anomalous': alert.is_anomalous,
+            'anomaly_score': float(alert.anomaly_score) if alert.anomaly_score else 0.0,
+            'signature_id': alert.signature_id,
+            'raw_log': alert.raw_log,
             
-        notification = AttackNotification.objects.get(id=notification_id, user=user)
-        notification.is_read = True
-        notification.save()
-        return Response({'status': 'success'})
-    except AttackNotification.DoesNotExist:
-        return Response({'status': 'error', 'message': 'Notification not found'}, status=404)
+        }
+        
+        print(f"Returning alert detail for ID: {alert_id}")
+        
+        return JsonResponse({
+            'status': 'success',
+            'alert': alert_data
+        })
 
-@api_view(['POST'])
-def generate_attack_report(request, notification_id):
-    """Generate a PDF report for an attack notification and email it"""
+    except Exception as e:
+        import traceback
+        print(f"Alert Detail API Error: {e}")
+        print(traceback.format_exc())
+        return JsonResponse({
+            'status': 'error',
+            'error': str(e)
+        }, status=500)
+
+def get_severity_display(severity):
+    """Convert severity number to display text"""
+    severity_map = {1: 'High', 2: 'Medium', 3: 'Low'}
+    return severity_map.get(severity, 'Unknown')
+
+@csrf_exempt
+@require_http_methods(["POST", "OPTIONS"])  
+def generate_report(request):
+    """Generate and send security report via email"""
+    
+    
+    if request.method == 'OPTIONS':
+        response = JsonResponse({'status': 'ok'})
+        response['Access-Control-Allow-Origin'] = 'http://localhost:3000'
+        response['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+        response['Access-Control-Allow-Headers'] = 'Content-Type'
+        return response
+    
     try:
-        notification = AttackNotification.objects.get(id=notification_id, user=request.user)
+        print("Generate report endpoint called")
+        print(f"Request method: {request.method}")
+        print(f"Request path: {request.path}")
         
+        data = json.loads(request.body)
+        email = data.get('email')
+        report_type = data.get('report_type', 'weekly')
         
-        pdf_file = generate_pdf_report(notification)
+        print(f"Request data: email={email}, report_type={report_type}")
         
+        if not email:
+            return JsonResponse({
+                'status': 'error',
+                'error': 'Email address is required'
+            }, status=400)
         
-        send_attack_report_email(request.user.email, notification, pdf_file)
+        # Generate report data
+        print("Generating report data...")
+        report_data = generate_report_data(report_type)
         
-        return Response({'status': 'success', 'message': 'Report sent to your email'})
-    except AttackNotification.DoesNotExist:
-        return Response({'status': 'error', 'message': 'Notification not found'}, status=404)
+        if not report_data:
+            return JsonResponse({
+                'status': 'error',
+                'error': 'Failed to generate report data'
+            }, status=500)
+        
+        print(f"Report data generated: {report_data.get('total_alerts', 0)} total alerts")
+        
+        # Generate PDF
+        print("Generating PDF...")
+        pdf_buffer = generate_enhanced_pdf_report(report_data, report_type)
+        
+        if not pdf_buffer:
+            return JsonResponse({
+                'status': 'error',
+                'error': 'Failed to generate PDF report'
+            }, status=500)
+        
+        print(f"PDF generated successfully, size: {len(pdf_buffer.getvalue())} bytes")
+        
+        # Send email with PDF attachment
+        print(f"Sending email to {email}...")
+        success = send_report_email(email, pdf_buffer, report_data, report_type)
+        
+        if success:
+            print(f"Email sent successfully to {email}")
+            return JsonResponse({
+                'status': 'success',
+                'message': f'Report sent successfully to {email}! Check your inbox for the detailed PDF report.'
+            })
+        else:
+            print(f"Failed to send email to {email}")
+            return JsonResponse({
+                'status': 'error',
+                'error': 'Failed to send email. Please check email configuration.'
+            }, status=500)
+        
+    except json.JSONDecodeError:
+        print("Invalid JSON data received")
+        return JsonResponse({
+            'status': 'error',
+            'error': 'Invalid JSON data'
+        }, status=400)
+        
+    except Exception as e:
+        import traceback
+        print(f"Generate report error: {e}")
+        print(traceback.format_exc())
+        return JsonResponse({
+            'status': 'error',
+            'error': str(e)
+        }, status=500)
 
-def generate_pdf_report(notification):
-    """Generate a PDF report for an attack notification using ReportLab"""
-    buffer = BytesIO()
-    
-    doc = SimpleDocTemplate(buffer, pagesize=letter)
-    styles = getSampleStyleSheet()
-    
-    title_style = styles["Heading1"]
-    title_style.alignment = 1  
-    
-    subtitle_style = styles["Heading2"]
-    subtitle_style.alignment = 1
-    
-    header_style = styles["Heading3"]
-    
-    
-    elements = []
-    
-    
-    elements.append(Paragraph("ModelSentinel IDS", title_style))
-    elements.append(Paragraph("Network Intrusion Detection System", subtitle_style))
-    elements.append(Spacer(1, 0.3*inch))
-    
-    
-    elements.append(Paragraph("Attack Detection Report", header_style))
-    elements.append(Paragraph(f"Generated: {notification.timestamp.strftime('%B %d, %Y, %I:%M %p')}", styles["Normal"]))
-    elements.append(Spacer(1, 0.2*inch))
-    
-   
-    elements.append(Paragraph("Attack Details", header_style))
-    
-    data = [
-        ["Attack Type:", notification.attack_type],
-        ["Severity:", notification.severity.upper()],
-        ["Timestamp:", notification.timestamp.strftime("%B %d, %Y, %I:%M:%S %p")]
-    ]
-    
-    
-    table = Table(data, colWidths=[2*inch, 4*inch])
-    table.setStyle(TableStyle([
-        ('GRID', (0, 0), (-1, -1), 0.5, colors.gray),
-        ('BACKGROUND', (0, 0), (0, -1), colors.lightgrey),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('PADDING', (0, 0), (-1, -1), 6),
-    ]))
-    
-    elements.append(table)
-    elements.append(Spacer(1, 0.2*inch))
-    
-  
-    elements.append(Paragraph("Description", header_style))
-    elements.append(Paragraph(notification.description, styles["Normal"]))
-    elements.append(Spacer(1, 0.2*inch))
-    
-    
-    elements.append(Paragraph("Recommendations", header_style))
-    recommendations = [
-        "Update your firewall rules to block suspicious traffic",
-        "Scan affected systems for malware",
-        "Check system logs for additional suspicious activity",
-        "Consider implementing additional security measures"
-    ]
-    
-    for rec in recommendations:
-        elements.append(Paragraph(f"• {rec}", styles["Normal"]))
-    
-    elements.append(Spacer(1, 0.3*inch))
-    
-    
-    footer_text = "This is an automated report generated by ModelSentinel IDS. Please contact your security team for further assistance."
-    elements.append(Paragraph(footer_text, styles["Italic"]))
-    
-    
-    doc.build(elements)
-    buffer.seek(0)
-    
-    return buffer
-
-def send_attack_report_email(email, notification, pdf_file):
-    """Send an email with the PDF report attached"""
-    subject = f"Attack Report: {notification.attack_type}"
-    message = f"Please find attached a report for the {notification.attack_type} attack detected on {notification.timestamp}."
-    from_email = settings.DEFAULT_FROM_EMAIL
-    
-    email_message = EmailMessage(subject, message, from_email, [email])
-    email_message.attach(f'attack_report_{notification.id}.pdf', pdf_file.read(), 'application/pdf')
-    email_message.send()
-
-@api_view(['POST'])
-
-def generate_alert_report(request):
-    """Generate a PDF report of recent alerts and email it"""
+def generate_report_data(report_type):
+    """Generate comprehensive report data"""
     try:
+        # Calculate date range based on report type
+        end_date = datetime.now()
+        if report_type == 'daily':
+            start_date = end_date - timedelta(days=1)
+            period_name = "Daily"
+        elif report_type == 'weekly':
+            start_date = end_date - timedelta(days=7)
+            period_name = "Weekly"
+        elif report_type == 'monthly':
+            start_date = end_date - timedelta(days=30)
+            period_name = "Monthly"
+        else:
+            start_date = end_date - timedelta(days=7)
+            period_name = "Weekly"
         
-        days = int(request.data.get('days', 1))
-        email = request.data.get('email')
-        
-        logger.info(f"🔍 Report request - days: {days}, email: {email}")
-        print(f"🔍 Generating report for {days} days to {email}")
-        
-        
-        end_date = timezone.now()
-        start_date = end_date - timedelta(days=days)
-        
-        print(f"📅 Date range: {start_date.strftime('%Y-%m-%d %H:%M:%S')} to {end_date.strftime('%Y-%m-%d %H:%M:%S')}")
-        
-        
-        all_alerts = SnortAlert.objects.filter(
+        # Filter alerts by date range
+        alerts = SnortAlert.objects.filter(
             timestamp__gte=start_date,
             timestamp__lte=end_date
         )
         
+        # Calculate statistics
+        total_alerts = alerts.count()
+        anomalies = alerts.filter(is_anomalous=True).count()
+        high_severity = alerts.filter(severity=1).count()
+        medium_severity = alerts.filter(severity=2).count()
+        low_severity = alerts.filter(severity=3).count()
         
-        total_alert_count = all_alerts.count()
-        print(f"📊 Total alerts in {days}-day period: {total_alert_count}")
+        # Protocol distribution
+        protocol_stats = {}
+        for alert in alerts:
+            protocol = alert.protocol or 'Unknown'
+            protocol_stats[protocol] = protocol_stats.get(protocol, 0) + 1
         
+        # Top source IPs
+        source_ip_stats = {}
+        for alert in alerts:
+            ip = alert.source_ip
+            if ip:
+                source_ip_stats[ip] = source_ip_stats.get(ip, 0) + 1
         
-        high_severity = all_alerts.filter(severity=1).count()
-        medium_severity = all_alerts.filter(severity=2).count()
-        low_severity = all_alerts.filter(severity=3).count()
-        print(f"📊 Severity counts - High: {high_severity}, Medium: {medium_severity}, Low: {low_severity}")
+        top_source_ips = sorted(source_ip_stats.items(), key=lambda x: x[1], reverse=True)[:10]
         
-       
-        table_alerts = all_alerts.order_by('-timestamp')[:100]
+        # Top signatures
+        signature_stats = {}
+        for alert in alerts:
+            sig = alert.signature or 'Unknown'
+            signature_stats[sig] = signature_stats.get(sig, 0) + 1
         
+        top_signatures = sorted(signature_stats.items(), key=lambda x: x[1], reverse=True)[:10]
         
-        buffer = BytesIO()
+        # Recent critical alerts
+        critical_alerts = alerts.filter(severity=1, is_anomalous=True).order_by('-timestamp')[:10]
         
+        return {
+            'period': period_name,
+            'start_date': start_date.strftime('%Y-%m-%d %H:%M:%S'),
+            'end_date': end_date.strftime('%Y-%m-%d %H:%M:%S'),
+            'total_alerts': total_alerts,
+            'anomalies': anomalies,
+            'anomaly_rate': round((anomalies / total_alerts * 100), 2) if total_alerts > 0 else 0,
+            'high_severity': high_severity,
+            'medium_severity': medium_severity,
+            'low_severity': low_severity,
+            'protocol_stats': protocol_stats,
+            'top_source_ips': top_source_ips,
+            'top_signatures': top_signatures,
+            'critical_alerts': [
+                {
+                    'timestamp': alert.timestamp.strftime('%Y-%m-%d %H:%M:%S'),
+                    'source_ip': alert.source_ip,
+                    'destination_ip': alert.destination_ip,
+                    'signature': alert.signature,
+                    'anomaly_score': float(alert.anomaly_score) if alert.anomaly_score else 0
+                }
+                for alert in critical_alerts
+            ]
+        }
         
-        doc = SimpleDocTemplate(buffer, pagesize=letter)
-        styles = getSampleStyleSheet()
+    except Exception as e:
+        print(f"Error generating report data: {e}")
+        return {}
+
+def generate_enhanced_pdf_report(data, report_type):
+    """Generate enhanced PDF report with charts and styling"""
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=72, leftMargin=72, topMargin=72, bottomMargin=18)
+    
+    # Get styles
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        'CustomTitle',
+        parent=styles['Heading1'],
+        fontSize=24,
+        spaceAfter=30,
+        alignment=1,  
+        textColor=colors.HexColor('#1f2937')
+    )
+    
+    heading_style = ParagraphStyle(
+        'CustomHeading',
+        parent=styles['Heading2'],
+        fontSize=16,
+        spaceAfter=12,
+        textColor=colors.HexColor('#374151')
+    )
+    
+    normal_style = ParagraphStyle(
+        'CustomNormal',
+        parent=styles['Normal'],
+        fontSize=11,
+        spaceAfter=6
+    )
+    
+    
+    story = []
+    
+    
+    story.append(Paragraph(f"Network Security Report - {data.get('period', 'Weekly')}", title_style))
+    story.append(Spacer(1, 12))
+    
+    
+    story.append(Paragraph(f"<b>Report Period:</b> {data.get('start_date')} to {data.get('end_date')}", normal_style))
+    story.append(Paragraph(f"<b>Generated:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", normal_style))
+    story.append(Spacer(1, 20))
+    
+    # Executive Summary
+    story.append(Paragraph("Executive Summary", heading_style))
+    
+    summary_data = [
+        ['Metric', 'Value', 'Status'],
+        ['Total Alerts', f"{data.get('total_alerts', 0):,}", ],
+        ['Anomalies Detected', f"{data.get('anomalies', 0):,}", '🚨' if data.get('anomalies', 0) > 0 else '✅'],
+        ['Anomaly Rate', f"{data.get('anomaly_rate', 0)}%", '⚠️' if data.get('anomaly_rate', 0) > 10 else '✅'],
+        ['High Severity', f"{data.get('high_severity', 0):,}", '🔴' if data.get('high_severity', 0) > 0 else '✅'],
+        ['Medium Severity', f"{data.get('medium_severity', 0):,}", '🟡'],
+        ['Low Severity', f"{data.get('low_severity', 0):,}", '🟢'],
+    ]
+    
+    summary_table = Table(summary_data, colWidths=[2*inch, 1.5*inch, 1*inch])
+    summary_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#3b82f6')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, 0), 12),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+        ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+        ('GRID', (0, 0), (-1, -1), 1, colors.black)
+    ]))
+    
+    story.append(summary_table)
+    story.append(Spacer(1, 20))
+    
+    # Protocol Distribution
+    if data.get('protocol_stats'):
+        story.append(Paragraph("Protocol Distribution", heading_style))
         
-        elements = []
+        protocol_data = [['Protocol', 'Count', 'Percentage']]
+        total = sum(data['protocol_stats'].values())
         
+        for protocol, count in sorted(data['protocol_stats'].items(), key=lambda x: x[1], reverse=True):
+            percentage = round((count / total * 100), 1) if total > 0 else 0
+            protocol_data.append([protocol, str(count), f"{percentage}%"])
         
-        title_style = styles["Heading1"]
-        title_style.alignment = 1 
-        elements.append(Paragraph("ModelSentinel IDS - Alert Report", title_style))
-        elements.append(Paragraph(f"Report Period: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')} ({days} days)", styles["Normal"]))
-        elements.append(Spacer(1, 0.25*inch))
-        
-        
-        stats_data = [
-            ['Total Alerts', f"{total_alert_count}"],
-            ['High Severity', f"{high_severity} ({high_severity/total_alert_count*100:.1f}% of total)" if total_alert_count else "0"],
-            ['Medium Severity', f"{medium_severity} ({medium_severity/total_alert_count*100:.1f}% of total)" if total_alert_count else "0"],
-            ['Low Severity', f"{low_severity} ({low_severity/total_alert_count*100:.1f}% of total)" if total_alert_count else "0"],
-        ]
-        
-        stats_table = Table(stats_data, colWidths=[2*inch, 1*inch])
-        stats_table.setStyle(TableStyle([
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-            ('BACKGROUND', (0, 0), (0, -1), colors.lightgrey),
+        protocol_table = Table(protocol_data, colWidths=[1.5*inch, 1*inch, 1*inch])
+        protocol_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#10b981')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 11),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.lightgrey),
+            ('GRID', (0, 0), (-1, -1), 1, colors.black)
         ]))
         
-        elements.append(Paragraph("Alert Statistics", styles["Heading2"]))
-        elements.append(stats_table)
-        elements.append(Spacer(1, 0.25*inch))
-        
-        
-        if table_alerts:
-            if total_alert_count > 100:
-                elements.append(Paragraph(f"Recent Alerts (Showing 100 most recent of {total_alert_count} total alerts)", styles["Heading2"]))
-            else:
-                elements.append(Paragraph("Recent Alerts", styles["Heading2"]))
-            
-            
-            alerts_data = [['Timestamp', 'Source IP', 'Destination IP', 'Protocol', 'Signature', 'Severity']]
-            
-           
-            for alert in table_alerts:
-                severity = {1: 'High', 2: 'Medium', 3: 'Low'}.get(alert.severity, 'Unknown')
-                signature = alert.signature
-                if signature and len(signature) > 50:
-                    signature = signature[:47] + '...'
-                
-                alerts_data.append([
-                    alert.timestamp.strftime('%Y-%m-%d %H:%M:%S'),
-                    alert.source_ip,
-                    alert.destination_ip,
-                    alert.protocol,
-                    signature,
-                    severity,
-                ])
-            
-            
-            alerts_table = Table(alerts_data, repeatRows=1)
-            alerts_table.setStyle(TableStyle([
-                ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-                ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
-                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ]))
-            elements.append(alerts_table)
-        else:
-            elements.append(Paragraph("No alerts found in the selected time period", styles["Normal"]))
-        
-        
-        doc.build(elements)
-        
-        logger.info("PDF generation completed successfully")
-    except Exception as pdf_error:
-        logger.error(f"Error generating PDF: {str(pdf_error)}")
-        return HttpResponse(f"Error generating PDF: {str(pdf_error)}", status=500)
+        story.append(protocol_table)
+        story.append(Spacer(1, 20))
     
+    # Top Source IPs
+    if data.get('top_source_ips'):
+        story.append(Paragraph("Top Source IPs", heading_style))
+        
+        ip_data = [['Rank', 'Source IP', 'Alert Count', 'Risk Level']]
+        
+        for i, (ip, count) in enumerate(data['top_source_ips'], 1):
+            risk = 'High' if count > 50 else 'Medium' if count > 10 else 'Low'
+            ip_data.append([str(i), ip, str(count), risk])
+        
+        ip_table = Table(ip_data, colWidths=[0.5*inch, 2*inch, 1*inch, 1*inch])
+        ip_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#ef4444')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 11),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.lightgrey),
+            ('GRID', (0, 0), (-1, -1), 1, colors.black)
+        ]))
+        
+        story.append(ip_table)
+        story.append(Spacer(1, 20))
     
+    # Critical Alerts
+    if data.get('critical_alerts'):
+        story.append(Paragraph("Recent Critical Alerts", heading_style))
+        
+        critical_data = [['Timestamp', 'Source IP', 'Destination IP', 'Signature', 'Score']]
+        
+        for alert in data['critical_alerts'][:10]:  # Limit to 10 most recent
+            signature = alert['signature'][:40] + '...' if len(alert['signature']) > 40 else alert['signature']
+            critical_data.append([
+                alert['timestamp'],
+                alert['source_ip'],
+                alert['destination_ip'],
+                signature,
+                f"{alert['anomaly_score']:.3f}"
+            ])
+        
+        critical_table = Table(critical_data, colWidths=[1.2*inch, 1.2*inch, 1.2*inch, 2*inch, 0.7*inch])
+        critical_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#dc2626')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 10),
+            ('FONTSIZE', (0, 1), (-1, -1), 8),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.lightgrey),
+            ('GRID', (0, 0), (-1, -1), 1, colors.black)
+        ]))
+        
+        story.append(critical_table)
+        story.append(Spacer(1, 20))
+    
+    # Recommendations
+    story.append(Paragraph("Security Recommendations", heading_style))
+    
+    recommendations = []
+    
+    if data.get('anomaly_rate', 0) > 20:
+        recommendations.append("• High anomaly rate detected - Consider reviewing ML model thresholds")
+    
+    if data.get('high_severity', 0) > 100:
+        recommendations.append("• Significant high-severity alerts - Implement additional security controls")
+    
+    for ip, count in data.get('top_source_ips', [])[:3]:
+        if count > 50:
+            recommendations.append(f"• Source IP {ip} shows suspicious activity ({count} alerts) - Consider blocking")
+    
+    if not recommendations:
+        recommendations = [
+            "• Continue monitoring current security posture",
+            "• Regular review of alert patterns recommended",
+            "• Maintain current security policies"
+        ]
+    
+    for rec in recommendations:
+        story.append(Paragraph(rec, normal_style))
+    
+    story.append(Spacer(1, 20))
+    
+    # Footer
+    story.append(Paragraph("---", normal_style))
+    story.append(Paragraph("This report was automatically generated by the Network Security Monitoring System.", normal_style))
+    story.append(Paragraph(f"For questions, contact your security team.", normal_style))
+    
+    # Build PDF
+    doc.build(story)
     buffer.seek(0)
-    filename = f"modelsentinel_report_{timezone.now().strftime('%Y%m%d_%H%M')}.pdf"
-    
-    
-    response = FileResponse(buffer, content_type='application/pdf')
-    response['Content-Disposition'] = f'attachment; filename="{filename}"'
-    response['Access-Control-Allow-Origin'] = '*'  
-    
-    logger.info(f"Returning PDF with filename {filename}")
-    
+    return buffer
+
+def send_report_email(email, pdf_buffer, data, report_type):
+    """Send email with PDF attachment"""
     try:
-        from_email = settings.DEFAULT_FROM_EMAIL
+        subject = f" {data.get('period', 'Weekly')} Security Report - {datetime.now().strftime('%Y-%m-%d')}"
         
-        subject = "ModelSentinel IDS - Security Alert Report"
+        
         body = f"""
-        Hello,
+        Dear Security Team,
 
-        Please find attached your requested security alert report from ModelSentinel IDS.
+        Please find attached your {data.get('period', 'weekly').lower()} network security report.
 
-        Report period: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}
-        Report timespan: {days} days
+        Key Highlights:
+        • Total Alerts: {data.get('total_alerts', 0):,}
+        • Anomalies Detected: {data.get('anomalies', 0):,}
+        • Anomaly Rate: {data.get('anomaly_rate', 0)}%
+        • High Severity Alerts: {data.get('high_severity', 0):,}
 
-        Alert Statistics:
-        - Total alerts: {total_alert_count} 
-        - High severity alerts: {high_severity} ({high_severity/total_alert_count*100:.1f}% of total) 
-        - Medium severity alerts: {medium_severity} ({medium_severity/total_alert_count*100:.1f}% of total)
-        - Low severity alerts: {low_severity} ({low_severity/total_alert_count*100:.1f}% of total)
+        {
+        "Action Required: High anomaly rate detected!" if data.get('anomaly_rate', 0) > 20 
+        else "Security status appears normal."
+        }
 
-        Note: The attached PDF contains up to 100 most recent alerts for readability.
+        Report Period: {data.get('start_date')} to {data.get('end_date')}
 
-        This is an automated email. Please do not reply.
+        Please review the attached detailed report and take appropriate action for any critical alerts.
 
-        Regards,
-        ModelSentinel IDS Team
+        Best regards,
+        Network Security Monitoring System
         """
-        email_message = EmailMessage(subject, body, from_email, [email])
-        email_message.attach(filename, buffer.getvalue(), 'application/pdf')
         
+        # Create email
+        email_msg = EmailMessage(
+            subject=subject,
+            body=body,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            to=[email],
+        )
         
-        print(f"Sending email to: {email}")
-        print(f"From: {from_email}")
-        print(f"Subject: {subject}")
-        print(f"Using EMAIL_HOST: {settings.EMAIL_HOST}")
+        # Attach PDF
+        filename = f"security_report_{report_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        email_msg.attach(filename, pdf_buffer.getvalue(), 'application/pdf')
         
+        # Send email
+        result = email_msg.send()
         
-        import smtplib
-        try:
-            email_message.send(fail_silently=False)
-            print("Email sent successfully!")
-        except smtplib.SMTPException as e:
-            print(f"SMTP Error: {e}")
-            return JsonResponse({'error': f'SMTP Error: {str(e)}'}, status=500)
-            
-        return JsonResponse({
-            'success': True,
-            'message': f'Report has been sent to {email}',
-        })
-    except Exception as email_error:
-        print(f"Exception during email sending: {email_error}")
-        return JsonResponse({'error': f'Error sending email: {str(email_error)}'}, status=500)
-
-@api_view(['POST'])
-def mark_all_notifications_read(request):
-    """Mark all notifications as read"""
-    try:
+        print(f"Email sent successfully to {email}: {result}")
+        return True
         
-        from .models import AttackNotification
-        count_attack = AttackNotification.objects.filter(is_read=False).count()
-        AttackNotification.objects.filter(is_read=False).update(is_read=True)
-        
-       
-        count_alerts = 0
-        try:
-            from .models import SnortAlert
-            if hasattr(SnortAlert, 'is_read'):
-                count_alerts = SnortAlert.objects.filter(is_read=False).count()
-                SnortAlert.objects.filter(is_read=False).update(is_read=True)
-        except Exception as alert_error:
-            print(f"Error updating SnortAlerts (this is fine if model doesn't have is_read): {alert_error}")
-        
-        return JsonResponse({
-            'success': True, 
-            'message': f'All notifications marked as read ({count_attack + count_alerts} total)'
-        })
     except Exception as e:
-        import traceback
-        print(f"Error marking notifications as read: {e}")
-        print(traceback.format_exc())
-        return JsonResponse({'success': False, 'error': str(e)}, status=500)
-
-
-def simulate_attack_detection(user, attack_type, description, severity='medium'):
-    """Simulate attack detection and create a notification"""
-    notification = AttackNotification.objects.create(
-        user=user,
-        attack_type=attack_type,
-        description=description,
-        severity=severity
-    )
-    return notification
-
-
-@api_view(['GET'])
-def get_notifications(request):
-    
-    alerts = SnortAlert.objects.order_by('-timestamp')[:20]
-    
-    response_data = []
-    for alert in alerts:
-        response_data.append({
-            'id': alert.id,
-            'message': f"{alert.signature} from {alert.source_ip}",
-            'timestamp': alert.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
-            'read': getattr(alert, 'is_read', False),
-            'severity': alert.severity
-        })
-    
-    return JsonResponse(response_data, safe=False)
+        print(f"Failed to send email: {e}")
+        return False

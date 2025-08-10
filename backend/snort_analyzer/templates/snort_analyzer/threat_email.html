@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Network Threat Alert</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background-color: white;
+            border-radius: 10px;
+            padding: 30px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        .header {
+            text-align: center;
+            border-bottom: 3px solid #dc3545;
+            padding-bottom: 20px;
+            margin-bottom: 30px;
+        }
+        .threat-high { border-color: #dc3545; color: #dc3545; }
+        .threat-medium { border-color: #fd7e14; color: #fd7e14; }
+        .threat-low { border-color: #ffc107; color: #ffc107; }
+        
+        .alert-icon {
+            font-size: 48px;
+            margin-bottom: 10px;
+        }
+        .threat-level {
+            font-size: 24px;
+            font-weight: bold;
+            margin: 10px 0;
+        }
+        .alert-info {
+            background-color: #f8f9fa;
+            border-left: 4px solid #007bff;
+            padding: 15px;
+            margin: 20px 0;
+        }
+        .alert-detail {
+            display: flex;
+            justify-content: space-between;
+            margin: 8px 0;
+            padding: 5px 0;
+            border-bottom: 1px solid #eee;
+        }
+        .alert-detail:last-child {
+            border-bottom: none;
+        }
+        .label {
+            font-weight: bold;
+            color: #495057;
+        }
+        .value {
+            color: #212529;
+            font-family: 'Courier New', monospace;
+        }
+        .ml-confidence {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+            margin: 20px 0;
+        }
+        .confidence-bar {
+            background-color: rgba(255, 255, 255, 0.3);
+            height: 8px;
+            border-radius: 4px;
+            margin: 10px 0;
+            overflow: hidden;
+        }
+        .confidence-fill {
+            background-color: white;
+            height: 100%;
+            transition: width 0.3s ease;
+        }
+        .action-needed {
+            background-color: #fff3cd;
+            border: 1px solid #ffeaa7;
+            border-radius: 5px;
+            padding: 15px;
+            margin: 20px 0;
+        }
+        .footer {
+            text-align: center;
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #dee2e6;
+            color: #6c757d;
+            font-size: 12px;
+        }
+        .btn {
+            display: inline-block;
+            padding: 10px 20px;
+            background-color: #007bff;
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+            margin: 10px 5px;
+        }
+        .btn-danger {
+            background-color: #dc3545;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header threat-{{ threat_level|lower }}">
+            <div class="alert-icon">🚨</div>
+            <h1>Network Intrusion Detected</h1>
+            <div class="threat-level">{{ threat_level }} THREAT</div>
+            <p><strong>{{ timestamp|date:"F j, Y" }} at {{ timestamp|time:"g:i A" }}</strong></p>
+        </div>
+
+        <div class="ml-confidence">
+            <h3>Machine Learning Analysis</h3>
+            <p><strong>Algorithm:</strong> {{ algorithm }}</p>
+            <p><strong>Threat Probability:</strong> {{ threat_probability_percent|floatformat:1 }}%</p>
+            <div class="confidence-bar">
+                <!-- <div class="confidence-fill" style="width: {{ threat_probability_percent }}%"></div> -->
+            </div>
+            <p><strong>Confidence Level:</strong> {{ confidence_percent|floatformat:1 }}%</p>
+        </div>
+
+        <div class="alert-info">
+            <h3>Alert Details</h3>
+            
+            <div class="alert-detail">
+                <span class="label">Source IP:Port</span>
+                <span class="value">{{ source }}</span>
+            </div>
+            
+            <div class="alert-detail">
+                <span class="label">Destination IP:Port</span>
+                <span class="value">{{ destination }}</span>
+            </div>
+            
+            <div class="alert-detail">
+                <span class="label">Protocol</span>
+                <span class="value">{{ alert.protocol }}</span>
+            </div>
+            
+            <div class="alert-detail">
+                <span class="label">Signature</span>
+                <span class="value">{{ alert.signature }}</span>
+            </div>
+            
+            <div class="alert-detail">
+                <span class="label">Severity</span>
+                <span class="value">{{ alert.get_severity_display }}</span>
+            </div>
+            
+            <div class="alert-detail">
+                <span class="label">Signature ID</span>
+                <span class="value">{{ alert.signature_id }}</span>
+            </div>
+        </div>
+
+        <div class="action-needed">
+            <h3>⚡ Immediate Action Required</h3>
+            <p>This alert has been classified as a <strong>{{ threat_level }}</strong> threat by our ML system with <strong>{{ confidence_percent|floatformat:1 }}%</strong> confidence.</p>
+            
+            <p><strong>Recommended Actions:</strong></p>
+            <ul>
+                <li>🔍 Investigate the source IP immediately</li>
+                <li>🛡️ Consider blocking the source if confirmed malicious</li>
+                <li>📊 Review related network traffic patterns</li>
+                <li>📋 Document findings for security analysis</li>
+            </ul>
+        </div>
+
+        {% if alert.raw_log %}
+        <div class="alert-info">
+            <h3>📝 Raw Log Entry</h3>
+            <pre style="background: #f8f9fa; padding: 10px; border-radius: 4px; overflow-x: auto; font-size: 11px;">{{ alert.raw_log|truncatechars:500 }}</pre>
+        </div>
+        {% endif %}
+
+        <div class="footer">
+            <p>🤖 This alert was generated automatically by the Network Intrusion Detection System</p>
+            <p>Generated on {{ timestamp|date:"F j, Y" }} at {{ timestamp|time:"g:i:s A" }}</p>
+            <p>Please do not reply to this email. Contact your system administrator for assistance.</p>
+        </div>
+    </div>
+</body>
+</html>

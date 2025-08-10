@@ -19,10 +19,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-    'rest_framework',
-    'django_filters',
-    'corsheaders',
-    'rest_framework_simplejwt',
+    'corsheaders',  
     'snort_analyzer',
 ]
 
@@ -123,13 +120,26 @@ SIMPLE_JWT = {
 ML_MODEL_DIR = os.path.join(BASE_DIR, 'ml_models')
 
 
-CORS_ALLOW_ALL_ORIGINS = True 
+# CORS settings
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+
 CORS_ALLOW_CREDENTIALS = True
+
+# For development only
+CORS_ALLOW_ALL_ORIGINS = True
 
 
 SNORT_LOGS_FILE = os.path.join(BASE_DIR.parent, 'snort_logs', 'alerts.csv')
 
 
+# Additional settings for ML integration
+ML_MODELS_DIR = os.path.join(BASE_DIR, 'ml_models')
+ML_NOTIFICATIONS_ENABLED = True
+ML_EMAIL_NOTIFICATIONS = True
+   
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
 EMAIL_HOST = 'smtp.gmail.com' 
 EMAIL_PORT = 587
@@ -137,3 +147,11 @@ EMAIL_USE_TLS = True
 EMAIL_HOST_USER = 'ashura150701@gmail.com' 
 EMAIL_HOST_PASSWORD = 'wucz hury kgzp mvjg'  
 DEFAULT_FROM_EMAIL = 'ModelSentinel IDS <ashura150701@gmail.com>'
+
+# Create logs directory
+os.makedirs(os.path.join(BASE_DIR, 'logs'), exist_ok=True)
+
+
+
+# ML notification emails
+ML_NOTIFICATION_EMAILS = ['admin@example.com', 'security@example.com']

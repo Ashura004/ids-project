@@ -2,7 +2,7 @@ import csv
 from datetime import datetime
 from django.db import transaction
 from .models import SnortAlert, IPStats, DailyStats
-from .ml.anomaly_detection import detect_anomaly
+from .ml.anomaly_detector import detect_anomaly
 
 def update_statistics(alert):
     """

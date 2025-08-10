@@ -1,26 +1,13 @@
-from django.urls import path, include
-from rest_framework.routers import DefaultRouter
-from .views import (
-    SnortAlertViewSet, dashboard_data,
-    register_user, login_user, user_profile, logout_user,
-    get_attack_notifications, mark_notification_read, mark_all_notifications_read
-)
-
-router = DefaultRouter()
-router.register(r'snort_alerts', SnortAlertViewSet)
+from django.urls import path
+from . import views
 
 urlpatterns = [
-    path('', include(router.urls)),
-    path('api/dashboard/', dashboard_data, name='dashboard-data'),
-    
-    
-    path('auth/register/', register_user, name='register'),
-    path('auth/login/', login_user, name='login'),
-    path('auth/profile/', user_profile, name='profile'),
-    path('auth/logout/', logout_user, name='logout'),
 
-    
-    path('api/attack-notifications/<int:notification_id>/read/', mark_notification_read, name='mark-notification-read'),
-    path('api/attack-notifications/mark-all-read', mark_all_notifications_read, name='mark-all-notifications-read'),
-    path('api/attack-notifications/', get_attack_notifications, name='get-notifications'),
+    path('', views.dashboard, name='dashboard'),
+    path('api/', views.dashboard_api, name='dashboard_api'),
+    path('api/alerts/', views.alerts_api, name='alerts_api'),
+    path('api/alerts/<int:alert_id>/', views.alert_detail_api, name='alert_detail_api'),  # Add this line
+    path('api/live-alerts/', views.live_alerts, name='live_alerts'),
+    path('api/notifications/', views.notifications_api, name='notifications_api'),
+    path('api/notifications/<int:notification_id>/read/', views.mark_notification_read, name='mark_notification_read'),
 ]

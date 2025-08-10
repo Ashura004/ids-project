@@ -1,0 +1,38 @@
+# Machine Learning Dependencies for Network Intrusion Detection System
+# Install these packages for ML functionality to work
+
+# Core ML Libraries
+scikit-learn==1.3.0
+pandas==2.0.3
+numpy==1.24.3
+joblib==1.3.1
+
+# Data preprocessing and visualization (optional but recommended)
+matplotlib==3.7.1
+seaborn==0.12.2
+
+# Performance optimizations
+scipy==1.11.1
+
+# Django email functionality (if not already installed)
+# django-extensions==3.2.3  # Uncomment if you want additional Django utilities
+
+# For production deployments (optional)
+# gunicorn==21.2.0  # Web server
+# psycopg2-binary==2.9.6  # PostgreSQL adapter (if using PostgreSQL)
+
+# Development and testing (optional)
+# jupyter==1.0.0  # For data analysis notebooks
+# pytest==7.4.0  # Testing framework
+# pytest-django==4.5.2  # Django testing integration
+
+# Notes:
+# 1. Install these dependencies in your virtual environment:
+#    pip install -r ml_requirements.txt
+#
+# 2. For production, you might want to pin specific versions more strictly
+#
+# 3. If you encounter compatibility issues, you can try these alternative versions:
+#    scikit-learn>=1.2.0,<1.4.0
+#    pandas>=1.5.0,<2.1.0
+#    numpy>=1.21.0,<1.25.0
